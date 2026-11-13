@@ -16,6 +16,9 @@
   const searchInput = document.querySelector('#search');
 
   const productById = new Map(products.map(product => [product.id, product]));
+  const catalogOrder = new Map(products.map((product, index) => [product.id, index]));
+  const sizeChoices = new Map();
+  const catalogAnimations = new Map();
   const storageKeys = { cart: window.PondoCart.key, favorites: 'pondo.favorites.v1' };
   const panel = document.querySelector('#shop-panel');
   const panelContent = document.querySelector('#panel-content');
@@ -90,10 +93,16 @@
     const selectId = `${scope}-size-${product.id}`;
     // Only curated local product data is interpolated; storage/user input is never HTML.
     card.innerHTML = `<div class="product-image"><img src="${product.image}" alt="${product.brand} ${productName(product)}. ${t('product.photo')}" loading="lazy" width="600" height="650"><span class="product-tag ${product.isNew ? '' : 'neutral'}">${t(product.isNew ? 'product.new' : 'product.edit')}</span><button type="button" class="favorite-button" data-favorite="${product.id}" aria-pressed="${favorites.has(product.id)}" aria-label="${t(favorites.has(product.id) ? 'favorites.remove' : 'favorites.add', { name: productName(product) })}">${heart}</button><span class="product-category">${categoryName(product.category)}</span></div><div class="product-meta"><span>${product.brand}</span><span>${t('product.demo')}</span></div><h3>${productName(product)}</h3><div class="product-details"><strong>${money(product.price)}</strong><span>${productColor(product)}</span></div><form class="product-purchase" data-add="${product.id}" novalidate>${needsSize(product) ? `<label for="${selectId}">${t('product.size')}</label><select id="${selectId}" name="size" required aria-label="${t('product.size')} ${productName(product)}"><option value="">${t('product.chooseSize')}</option>${product.sizes.map(size => `<option value="${size}">${size}</option>`).join('')}</select><span class="size-error" role="status"></span>` : `<p class="one-size">${t('product.oneSize')}</p>`}<button class="product-button" type="submit">${t('product.add')} <span aria-hidden="true">↗</span></button></form>${inFavorites ? `<button class="view-product text-button" type="button" data-view="${product.id}">${t('product.view')}</button>` : ''}`;
+    const sizeSelect = card.querySelector('select');
+    if (sizeSelect && sizeChoices.has(selectId)) sizeSelect.value = sizeChoices.get(selectId);
     handleImage(card.querySelector('img'));
     return card;
   }
+  function rememberSizes(root) {
+    root.querySelectorAll('.product-purchase select').forEach(select => sizeChoices.set(select.id, select.value));
+  }
   function renderPanel(focusKey) {
+    rememberSizes(panelContent);
     document.querySelector('#panel-title').textContent = t(panelMode === 'cart' ? 'cart.title' : 'favorites.title');
     document.querySelector('#cart-summary').hidden = panelMode !== 'cart';
     document.querySelector('#checkout-link').hidden = panelMode !== 'cart' || !cart.length || storageUnavailable;
@@ -193,6 +202,7 @@
       const removed = favorites.delete(id);
       if (!removed) favorites.add(id);
       persist('favorites'); updateShop();
+      orderCatalog(true);
       if (panel.open && panelMode === 'favorites') {
         const cards = Array.from(panelContent.querySelectorAll('[data-favorite]'));
         const position = cards.indexOf(favorite);
@@ -236,12 +246,16 @@
       cart = readStored('cart');
       favorites = new Set(readStored('favorites'));
       updateShop();
+      orderCatalog();
     }
   });
   window.addEventListener('storage', event => {
     if (event.key !== null && !Object.values(storageKeys).includes(event.key)) return;
     if (event.key === storageKeys.cart || event.key === null) cart = readStored('cart');
-    if (event.key === storageKeys.favorites || event.key === null) favorites = new Set(readStored('favorites'));
+    if (event.key === storageKeys.favorites || event.key === null) {
+      favorites = new Set(readStored('favorites'));
+      orderCatalog(true);
+    }
     updateShop();
     if (panel.open) renderPanel();
   });
@@ -280,7 +294,51 @@
     });
   }
   document.querySelectorAll('img').forEach(handleImage);
+  function cancelCatalogAnimations() {
+    catalogAnimations.forEach(animation => animation.cancel());
+    catalogAnimations.clear();
+  }
+  function orderCatalog(animate = false) {
+    const cards = Array.from(grid.children);
+    // The most recently saved item leads the favourites group; other items keep catalog order.
+    const favoriteRank = new Map([...favorites].reverse().map((id, index) => [id, index]));
+    const ordered = [...cards].sort((a, b) => {
+      const aId = a.dataset.productId, bId = b.dataset.productId;
+      const aRank = favoriteRank.get(aId), bRank = favoriteRank.get(bId);
+      if (aRank !== undefined && bRank !== undefined) return aRank - bRank;
+      if (aRank !== undefined) return -1;
+      if (bRank !== undefined) return 1;
+      return catalogOrder.get(aId) - catalogOrder.get(bId);
+    });
+    if (cards.every((card, index) => card === ordered[index])) return;
+    const previous = new Map(cards.map(card => [card, card.getBoundingClientRect()]));
+    const active = document.activeElement;
+    const scroll = { left: window.scrollX, top: window.scrollY, behavior: 'instant' };
+    cancelCatalogAnimations();
+    cards.forEach(card => { card.style.animation = 'none'; });
+    ordered.forEach((card, index) => {
+      if (grid.children[index] !== card) grid.insertBefore(card, grid.children[index] || null);
+    });
+    if (active !== document.body && active.isConnected && document.activeElement !== active) active.focus({ preventScroll: true });
+    if (window.scrollY !== scroll.top || window.scrollX !== scroll.left) window.scrollTo(scroll);
+    if (!animate || window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+    ordered.forEach(card => {
+      const before = previous.get(card), after = card.getBoundingClientRect();
+      const dx = before.left - after.left, dy = before.top - after.top;
+      if (Math.abs(dx) + Math.abs(dy) < 1) return;
+      if ((before.bottom < 0 || before.top > window.innerHeight) && (after.bottom < 0 || after.top > window.innerHeight)) return;
+      const restingTransform = getComputedStyle(card).transform;
+      const animation = card.animate([
+        { transform: `translate(${dx}px, ${dy}px) ${restingTransform === 'none' ? '' : restingTransform}` },
+        { transform: restingTransform }
+      ], { duration: 280, easing: 'cubic-bezier(.2,.7,.2,1)' });
+      catalogAnimations.set(card, animation);
+      animation.onfinish = () => { if (catalogAnimations.get(card) === animation) catalogAnimations.delete(card); };
+    });
+  }
   function renderProducts() {
+    rememberSizes(grid);
+    cancelCatalogAnimations();
     const visible = products.filter(product =>
       (state.category === 'all' || product.category === state.category) &&
       (!state.newOnly || product.isNew) &&
@@ -288,6 +346,7 @@
     );
     grid.replaceChildren();
     visible.forEach(product => grid.append(createProductCard(product)));
+    orderCatalog();
     document.querySelector('#empty-state').hidden = visible.length > 0;
     const count = visible.length;
     document.querySelector('#product-count').textContent = i18n.count(count) + (state.newOnly ? t('catalog.newSuffix') : '');
@@ -318,6 +377,7 @@
 
   document.addEventListener('change', event => {
     if (event.target.matches('.product-purchase select')) {
+      sizeChoices.set(event.target.id, event.target.value);
       event.target.removeAttribute('aria-invalid');
       event.target.closest('form').querySelector('.size-error').textContent = '';
     }
@@ -491,9 +551,12 @@
   }, { passive: true });
   hero.addEventListener('touchcancel', () => { touchStart = null; scheduleSlide(); });
   document.addEventListener('visibilitychange', scheduleSlide);
-  motion.addEventListener('change', () => { finishTransition(); scheduleSlide(true); });
+  motion.addEventListener('change', () => {
+    if (motion.matches) cancelCatalogAnimations();
+    finishTransition(); scheduleSlide(true);
+  });
   new MutationObserver(scheduleSlide).observe(panel, { attributes: true, attributeFilter: ['open'] });
-  window.addEventListener('pagehide', () => { pageAway = true; scheduleSlide(); finishTransition(); });
+  window.addEventListener('pagehide', () => { cancelCatalogAnimations(); pageAway = true; scheduleSlide(); finishTransition(); });
   window.addEventListener('pageshow', () => { pageAway = false; scheduleSlide(); });
   showSlide(0, false, false);
   scheduleSlide();
